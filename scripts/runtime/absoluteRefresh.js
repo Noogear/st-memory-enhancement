@@ -10,6 +10,14 @@ import { Form } from '../../components/formManager.js';
 import { refreshRebuildTemplate } from "../settings/userExtensionSetting.js"
 import { safeParse } from '../../utils/stringUtil.js';
 
+// 错误持久化：将错误信息存入 sessionStorage，方便用户事后查看
+function persistError(tag, err) {
+    const entry = `[${new Date().toLocaleTimeString()}] [${tag}] ${err?.message || err}\n${err?.stack || ''}`;
+    const existing = sessionStorage.getItem('muyoo_error_log') || '';
+    sessionStorage.setItem('muyoo_error_log', existing + entry + '\n---\n');
+    console.error(`[muyoo:${tag}]`, err);
+}
+
 // 在解析响应后添加验证
 function validateActions(actions) {
     if (!Array.isArray(actions)) {
@@ -877,8 +885,8 @@ export async function executeIncrementalUpdateFromSummary(
 
     try {
         DERIVED.any.waitingPiece = referencePiece;
-        const separateReadContextLayers = Number($('#separateReadContextLayers').val());
-        const contextChats = await getRecentChatHistory(USER.getContext().chat, separateReadContextLayers, true);
+        const effectiveLayers = Number($('#separateReadContextLayers').val());
+        const contextChats = await getRecentChatHistory(USER.getContext().chat, effectiveLayers, true);
         const summaryChats = chatToBeUsed;
 
         // 获取角色世界书内容
@@ -922,6 +930,7 @@ export async function executeIncrementalUpdateFromSummary(
         } catch (e) {
             console.error("Error parsing step_by_step_user_prompt string:", e, "Raw string:", stepByStepPromptString);
             EDITOR.error("独立填表提示词格式错误，无法解析。请检查插件设置。", e.message, e);
+            // 提示词错误不计入失败计数（非临时故障）
             return 'error';
         }
 
@@ -996,11 +1005,22 @@ export async function executeIncrementalUpdateFromSummary(
             return 'error';
         }
 
+        // 检查 AI 是否返回了签收标签（区分正常响应和 API 拒绝/异常）
+        const hasStatusTag = rawContent.includes('<tableStatus>DONE</tableStatus>');
+        if (!hasStatusTag) {
+            console.warn('[Memory Enhancement] AI未返回<tableStatus>DONE</tableStatus>标签，疑似API拒绝或异常响应，不标记为已处理。');
+            console.warn('[Memory Enhancement] 原始响应(前200字):', rawContent.slice(0, 200));
+            if (!isSilentMode) EDITOR.info('AI未返回签收标签，疑似API拒绝，本次不标记为已处理');
+            return 'error';
+        }
+        // 移除签收标签，避免干扰 tableEdit 解析
+        rawContent = rawContent.replace(/<tableStatus>.*?<\/tableStatus>/gs, '');
+
         // **核心修复**: 使用与常规填表完全一致的 getTableEditTag 函数来提取指令
         const { matches } = getTableEditTag(rawContent);
 
         if (!matches || matches.length === 0) {
-            EDITOR.info("AI未返回任何有效的<tableEdit>操作指令，表格内容未发生变化。");
+            if (!isSilentMode) EDITOR.info("AI已签收但未返回任何有效的<tableEdit>操作指令，表格内容未发生变化。");
             return 'success';
         }
 
@@ -1018,13 +1038,8 @@ export async function executeIncrementalUpdateFromSummary(
         return 'success';
 
     } catch (error) {
-        console.error('执行增量更新时出错:', error);
+        persistError('executeIncrementalUpdate', error);
         EDITOR.error(`执行增量更新失败`, error.message, error);
-        console.log('[Memory Enhancement Plugin] Error context:', {
-            timestamp: new Date().toISOString(),
-            error: error.message,
-            stack: error.stack,
-        });
         return 'error';
     }
 }

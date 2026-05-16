@@ -1,10 +1,17 @@
 import {BASE, DERIVED, EDITOR, SYSTEM, USER} from '../../core/manager.js';
 import { executeIncrementalUpdateFromSummary } from "./absoluteRefresh.js";
 import { newPopupConfirm } from '../../components/popupConfirm.js';
-import { reloadCurrentChat } from "/script.js"
 import {getTablePrompt,initTableData, undoSheets} from "../../index.js"
 
 let toBeExecuted = [];
+
+// 错误持久化：将错误信息存入 sessionStorage，方便用户事后查看
+function persistError(tag, err) {
+    const entry = `[${new Date().toLocaleTimeString()}] [${tag}] ${err?.message || err}\n${err?.stack || ''}`;
+    const existing = sessionStorage.getItem('muyoo_error_log') || '';
+    sessionStorage.setItem('muyoo_error_log', existing + entry + '\n---\n');
+    console.error(`[muyoo:${tag}]`, err);
+}
 
 /**
  * 初始化两步总结所需的数据
@@ -112,7 +119,7 @@ export async function TableTwoStepSummary(mode) {
         // This block executes if confirmResult is true OR 'dont_remind_active'
         if (confirmResult === 'dont_remind_active') {
             console.log('独立填表弹窗已被禁止，自动执行。');
-            EDITOR.info('已选择“一直选是”，操作将在后台自动执行...'); // <--- 增加后台执行提示
+            // 静默模式下不显示通知
         } else { // confirmResult === true
             console.log('用户确认执行独立填表 (或首次选择了“一直选是”并确认)');
         }
@@ -129,6 +136,8 @@ export async function TableTwoStepSummary(mode) {
  * @param {string|boolean} confirmResult - 用户的确认结果。
  */
 export async function manualSummaryChat(todoChats, confirmResult) {
+    const isSilentMode = confirmResult === 'dont_remind_active';
+
     // 步骤一：检查是否需要执行“撤销”操作
     // 首先获取当前的聊天片段，以判断表格状态
     const { piece: initialPiece } = USER.getChatPiece();
@@ -142,11 +151,11 @@ export async function manualSummaryChat(todoChats, confirmResult) {
         console.log('[Memory Enhancement] 立即填表：检测到表格中有数据，执行恢复操作...');
         try {
             await undoSheets(0);
-            EDITOR.success('表格已恢复到上一版本。');
+            if (!isSilentMode) EDITOR.success('表格已恢复到上一版本。');
             console.log('[Memory Enhancement] 表格恢复成功，准备执行填表。');
         } catch (e) {
+            persistError('undoSheets', e);
             EDITOR.error('恢复表格失败，操作中止。', e.message, e);
-            console.error('[Memory Enhancement] 调用 undoSheets 失败:', e);
             return;
         }
     } else {
@@ -166,10 +175,8 @@ export async function manualSummaryChat(todoChats, confirmResult) {
 
     // 表格总体提示词
     const finalPrompt = initTableData(); // 获取表格相关提示词
-    
-    // 设置
+
     const useMainApiForStepByStep = USER.tableBaseSetting.step_by_step_use_main_api ?? true;
-    const isSilentMode = confirmResult === 'dont_remind_active';
 
     const r = await executeIncrementalUpdateFromSummary(
         todoChats,
@@ -190,10 +197,13 @@ export async function manualSummaryChat(todoChats, confirmResult) {
         });
         toBeExecuted = [];
 
-        // 保存并刷新UI
+        // 保存并静默刷新UI（不触发整页重建，避免闪烁）
         await USER.saveChat();
-        // 根据用户要求，使用整页刷新来确保包括宏在内的所有数据都得到更新。
-        reloadCurrentChat();
+        BASE.refreshContextView();
+        // 重渲染消息中的 {{GET::}} 宏
+        document.querySelectorAll('.mes_text[data-macro-processed]').forEach(mes => {
+            delete mes.dataset.macroProcessed;
+        });
         return true;
     } else if (r === 'suspended' || r === 'error' || !r) {
         console.log('执行增量独立填表失败或取消: ', `(${todoChats.length}) `, toBeExecuted);

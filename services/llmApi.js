@@ -8,6 +8,13 @@ try {
 } catch (e) {
     console.warn("未检测到 /scripts/custom-request.js 或未正确导出 ChatCompletionService，将禁用代理相关功能。", e);
 }
+
+// 错误持久化
+function persistError(tag, err) {
+    const entry = `[${new Date().toLocaleTimeString()}] [${tag}] ${err?.message || err}\n${err?.stack || ''}`;
+    const existing = sessionStorage.getItem('muyoo_error_log') || '';
+    sessionStorage.setItem('muyoo_error_log', existing + entry + '\n---\n');
+}
 export class LLMApiService {
     constructor(config = {}) {
         this.config = {
@@ -89,7 +96,7 @@ export class LLMApiService {
                     return this.#cleanResponse(responseData.content);
                 }
             } catch (error) {
-                console.error("通过 SillyTavern 内部路由调用 LLM API 错误:", error);
+                persistError('LLM-Proxy', error);
                 throw error;
             }
         } else {
@@ -123,7 +130,7 @@ export class LLMApiService {
                     return await this.#handleRegularResponse(apiEndpoint, headers, data);
                 }
             } catch (error) {
-                console.error("直接调用 LLM API 错误:", error);
+                persistError('LLM-Direct', error);
                 throw error;
             }
         }
@@ -172,29 +179,24 @@ export class LLMApiService {
         const decoder = new TextDecoder('utf-8');
         let buffer = '';
         let fullResponse = '';
-        let chunkIndex = 0; // Add chunk index for logging
-
         try {
-            console.log('[Stream] Starting stream processing for custom API...'); // Log stream start
+            console.log('[Stream] Starting stream processing for custom API...');
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) {
-                    console.log('[Stream] Custom API stream finished (done=true).'); // Log stream end
+                    console.log('[Stream] Custom API stream finished.');
                     break;
                 }
 
                 const decodedChunk = decoder.decode(value, { stream: true });
                 buffer += decodedChunk;
-                chunkIndex++;
-                console.log(`[Stream] Custom API received chunk ${chunkIndex}. Buffer length: ${buffer.length}`); // Log received chunk and buffer size
 
                 const lines = buffer.split('\n');
-                buffer = lines.pop() || ''; // Keep potential incomplete line in buffer
+                buffer = lines.pop() || '';
 
                 for (const line of lines) {
                     const trimmedLine = line.trim();
                     if (trimmedLine === '') continue;
-                    console.log(`[Stream] Custom API processing line: "${trimmedLine}"`); // Log processed line
 
                     try {
                         if (trimmedLine.startsWith('data: ')) {
@@ -217,7 +219,7 @@ export class LLMApiService {
                                 // console.log('[Stream] Custom API line parsed, but no content found in delta.');
                             }
                         } else {
-                             console.log('[Stream] Custom API line does not start with "data: ". Skipping.');
+                             // Not a SSE data line, skip
                         }
                     } catch (e) {
                         console.warn("[Stream] Custom API error parsing line JSON:", e, "Line:", trimmedLine); // Log parsing errors
@@ -230,7 +232,6 @@ export class LLMApiService {
             // Process any remaining data in the buffer after the loop finishes
             const finalBufferTrimmed = buffer.trim();
             if (finalBufferTrimmed) {
-                console.log(`[Stream] Custom API processing final buffer content: "${finalBufferTrimmed}"`); // Log final buffer processing
                 try {
                     // Attempt to handle potential JSON object directly in buffer (less common for SSE)
                     if (finalBufferTrimmed.startsWith('data: ')) {
